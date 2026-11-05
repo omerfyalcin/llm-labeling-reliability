@@ -1,0 +1,49 @@
+Label counts
+
+        LOCAL      NATIONAL NON-POLITICAL         STATE       UNCLEAR 
+         2051          1691          2233          3282           743 
+
+All tweets: P(NATIONAL) ~ log10(population)
+
+t test of coefficients:
+
+             Estimate Std. Error t value  Pr(>|t|)    
+(Intercept)  0.466835   0.090147  5.1786 2.279e-07 ***
+log10_pop   -0.045071   0.013184 -3.4186 0.0006319 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+Political tweets only (NATIONAL/STATE/LOCAL): P(NATIONAL) ~ log10(population)
+
+t test of coefficients:
+
+             Estimate Std. Error t value  Pr(>|t|)    
+(Intercept)  0.753869   0.137502  5.4826 4.337e-08 ***
+log10_pop   -0.077527   0.020038 -3.8691 0.0001102 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+All tweets, logit: NATIONAL ~ log10(population)
+
+z test of coefficients:
+
+             Estimate Std. Error z value  Pr(>|z|)    
+(Intercept)  0.521883   0.615567  0.8478 0.3965441    
+log10_pop   -0.321002   0.091054 -3.5254 0.0004229 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+State level: Spearman correlation of NATIONAL share and population
+
+	Spearman's rank correlation rho
+
+data:  by_state$national_share and by_state$population
+S = 29015, p-value = 0.004721
+alternative hypothesis: true rho is not equal to 0
+sample estimates:
+       rho 
+-0.3932915 
+

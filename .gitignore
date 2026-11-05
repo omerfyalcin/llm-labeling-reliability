@@ -1,0 +1,26 @@
+# Secrets
+.env
+.Renviron
+
+# Data (tweet text is not redistributed)
+*.csv
+!state_national/results/by_state.csv
+!state_national/download/nst-est2020-alldata.csv
+*.rds
+*.duckdb
+*.duckdb.wal
+
+# Quarto / R output
+*_cache/
+*_files/
+/.quarto/
+slides.html
+handout.html
+handout.pdf
+.Rhistory
+.RData
+.Rproj.user/
+Rplots.pdf
+
+# OS
+.DS_Store

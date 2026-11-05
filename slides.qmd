@@ -1,0 +1,1120 @@
+---
+title: "Labeling Text with LLMs"
+subtitle: "How to make LLM measurement reliable"
+author: "Omer Yalcin"
+date: 2026-11-05
+date-format: long
+format:
+  revealjs:
+    theme: default
+    css: styles.css
+    slide-number: true
+    embed-resources: true
+    code-overflow: wrap
+    highlight-style: github
+    fig-width: 10
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r}
+#| label: setup
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(ellmer)
+
+readRenviron(".env") # sets OPENROUTER_API_KEY
+source("llm_cache.R") # caches LLM labels in llm_cache.duckdb
+
+n_per_set <- 100 # tweets in each of the development and test sets
+
+berkeley_blue <- "#003262"
+muted <- "#B8C0CC"
+
+theme_set(
+  theme_minimal(base_size = 20) +
+    theme(
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text = element_text(color = "#333333"),
+      plot.title.position = "plot"
+    )
+)
+```
+
+```{r}
+#| label: load-data
+#| cache: true
+source("analyze.R")
+```
+
+```{r}
+#| label: sample
+format_tweet <- function(text, quoted) {
+  if_else(
+    is.na(quoted),
+    paste0("Tweet: ", text),
+    paste0("Tweet: ", text, "\n\nQuoted tweet: ", quoted)
+  )
+}
+
+# Random tweets: one set to develop the prompt, one held out to compare configurations.
+# The sampled IDs are stored in the cache, so the sample never changes once drawn.
+sample_ids <- cached_sample(paste0("dev-test-", n_per_set), \() {
+  set.seed(2026)
+  slice_sample(tweets_clean, n = 2 * n_per_set)$id_str
+})
+
+sampled <- tweets_clean |>
+  filter(id_str %in% sample_ids) |>
+  arrange(match(id_str, sample_ids)) |>
+  mutate(
+    set = rep(c("dev", "test"), each = n_per_set),
+    input = format_tweet(full_text, quoted_status.full_text)
+  )
+
+dev <- filter(sampled, set == "dev")
+test <- filter(sampled, set == "test")
+
+# Tweets rendered as HTML cards. Tweet text from the API is already HTML-escaped.
+# `probs`: id, label, p; shown as bars to the right of each card.
+tweet_html <- function(df, numbered = FALSE, show_labels = FALSE) {
+  labels_shown <- if (show_labels) df$labels else rep(NA, nrow(df))
+  pmap_chr(
+    list(df$user.name, df$user.screen_name, df$legislator_state, df$created_at,
+         df$full_text, df$quoted_status.full_text, seq_len(nrow(df)), labels_shown),
+    \(name, handle, state, date, text, quoted, i, labs) {
+      paste0(
+        '<div class="tweet">',
+        if (numbered) paste0('<span class="tweet-number">#', i, "</span>") else "",
+        '<div class="tweet-header"><strong>', name, "</strong> @", handle,
+        " · ", state, " · ", format(date, "%b %d, %Y"), "</div>",
+        text,
+        if (!is.na(quoted)) paste0('<div class="quoted">', quoted, "</div>") else "",
+        if (!is.na(labs)) paste0('<div class="tweet-labels">5 runs: ', labs, "</div>") else "",
+        "</div>"
+      )
+    }
+  )
+}
+
+tweet_cards <- function(df, numbered = FALSE, show_labels = FALSE, probs = NULL) {
+  cards <- tweet_html(df, numbered, show_labels)
+  if (!is.null(probs)) {
+    cards <- map2_chr(cards, df$id_str, \(card, id) {
+      paste0('<div class="tweet-row">', card, prob_bars(filter(probs, .data$id == .env$id)), "</div>")
+    })
+  }
+  cat(cards, sep = "\n")
+}
+
+# The model's probability of each label on one call, as HTML bars
+prob_bars <- function(p) {
+  p <- arrange(p, match(label, labels))
+  rows <- paste0(
+    '<div class="prob-row', if_else(p$p == max(p$p), " top", ""), '">',
+    '<span class="prob-label">', p$label, "</span>",
+    '<span><div class="prob-bar" style="width:', round(100 * p$p), '%"></div></span>',
+    '<span class="prob-value">', scales::percent(p$p, accuracy = 1), "</span></div>"
+  )
+  paste0('<div class="probs"><div class="probs-title">Probability (one call)</div>',
+         paste(rows, collapse = ""), "</div>")
+}
+
+# Tweets (with `id`) as rows, labels as (slanted) columns, one box per tweet and label.
+# Without `counts` the boxes are empty, to be marked by hand (slide and handout);
+# with `counts` (id, label, n) each box shows how often the LLM chose that label.
+coding_grid <- function(df, counts = NULL) {
+  header <- paste0(
+    '<th class="grid-tweet"></th>',
+    paste0('<th class="grid-label"><div><span>', labels, "</span></div></th>", collapse = "")
+  )
+  cards <- tweet_html(df, numbered = TRUE)
+  rows <- map2_chr(cards, df$id, \(card, id) {
+    cells <- map_chr(labels, \(lab) {
+      if (is.null(counts)) return('<td class="grid-cell"><span class="grid-box"></span></td>')
+      n <- sum(counts$n[counts$id == id & counts$label == lab])
+      paste0(
+        '<td class="grid-cell"><span class="grid-box', if (n == 0) " zero" else if (n >= 3) " dark" else "",
+        '" style="--share:', n / 5, '">', n, "</span></td>"
+      )
+    })
+    paste0('<tr><td class="grid-tweet">', card, "</td>", paste(cells, collapse = ""), "</tr>")
+  })
+  paste0('<div class="coding-grid-wrap"><table class="coding-grid"><thead><tr>', header,
+         "</tr></thead><tbody>", paste(rows, collapse = ""), "</tbody></table></div>")
+}
+```
+
+```{r}
+#| label: llm-setup
+labels <- c("NATIONAL", "STATE", "LOCAL", "NON-POLITICAL", "UNCLEAR")
+
+modal <- function(x) names(which.max(table(x)))
+
+kripp_alpha <- function(id, label) {
+  n_uc <- table(id, label) # tweets x labels: how many runs chose each label
+  m <- rowSums(n_uc)
+  n_uc <- n_uc[m > 1, , drop = FALSE]
+  m <- m[m > 1]
+  n <- sum(n_uc)
+  observed <- sum(n_uc * (n_uc - 1) / (m - 1)) / n
+  expected <- sum(colSums(n_uc) * (colSums(n_uc) - 1)) / (n * (n - 1))
+  1 - (1 - observed) / (1 - expected)
+}
+
+per_tweet <- function(coded) {
+  coded |>
+    filter(!is.na(label)) |>
+    summarise(
+      n_labels = n_distinct(label),
+      agreement = max(table(label)) / n(),
+      labels = paste0(names(table(label)), " (", table(label), ")", collapse = ", "),
+      .by = c(config, id)
+    )
+}
+
+reliability <- function(coded) {
+  coded <- filter(coded, !is.na(label))
+  per_tweet(coded) |>
+    summarise(identical = mean(n_labels == 1), .by = config) |>
+    left_join(
+      summarise(coded, alpha = kripp_alpha(id, label), .by = config),
+      by = "config"
+    )
+}
+
+plot_reliability <- function(summary, current) {
+  summary |>
+    mutate(
+      config = factor(config, levels = rev(config)),
+      current = config == .env$current,
+      text = paste0(scales::percent(identical, accuracy = 1), "  (α = ", sprintf("%.2f", alpha), ")")
+    ) |>
+    ggplot(aes(identical, config)) +
+    geom_col(aes(fill = current), width = 0.6) +
+    geom_text(aes(label = text), hjust = -0.05, size = 6, color = "#333333") +
+    scale_fill_manual(values = c(`TRUE` = berkeley_blue, `FALSE` = muted), guide = "none") +
+    scale_x_continuous(labels = scales::percent, limits = c(0, 1.3), breaks = seq(0, 1, 0.25)) +
+    labs(x = "Tweets with the same label in all 5 runs", y = NULL)
+}
+
+# The model's probability of each label for one tweet (see label_probs() in llm_cache.R)
+plot_probs <- function(probs, text = scales::percent(probs$p, accuracy = 1)) {
+  probs |>
+    mutate(label = factor(label, levels = rev(labels)), text = text) |>
+    mutate(top = p == max(p), .by = any_of("prompt")) |>
+    ggplot(aes(p, label)) +
+    geom_col(aes(fill = top), width = 0.6) +
+    geom_text(aes(label = text), hjust = -0.1, size = 6, color = "#333333") +
+    scale_fill_manual(values = c(`TRUE` = berkeley_blue, `FALSE` = muted), guide = "none") +
+    scale_x_continuous(labels = scales::percent, limits = c(0, 1.45), breaks = seq(0, 1, 0.25)) +
+    labs(x = "Probability of the label (one call)", y = NULL)
+}
+
+# Token probabilities come from Parasail: DeepInfra, which does the runs, doesn't return them.
+# Same model, prompt, and settings as the runs; only the provider differs.
+on_parasail <- function(chat) {
+  chat_openrouter(
+    system_prompt = chat$get_system_prompt(),
+    model = chat$get_model(),
+    params = params(temperature = 1),
+    api_args = list(provider = list(
+      order = list("Parasail"), allow_fallbacks = FALSE, require_parameters = TRUE
+    ))
+  )
+}
+
+# NATIONAL is tokenized as N + ATIONAL; NON-POLITICAL starts with its own token, NON
+first_tokens <- c(NATIONAL = "N")
+
+# Example tweet for the probability charts: a held-out tweet that falls under one of the new rules
+example_id <- "1058137896912334848" # early voting for the legislator's own campaign: LOCAL under Rule 1
+example <- filter(test, id_str == example_id)
+```
+
+## Lesson Overview
+
+::: {.corpus-task}
+::: {.corpus}
+::: {.corpus-grid}
+::: {.doc-sketch}
+[Tweets]{.doc-tag}
+
+[]{.sketch-line .w100}
+[]{.sketch-line .w90}
+[]{.sketch-line .w55}
+:::
+::: {.doc-sketch}
+[Speeches]{.doc-tag}
+
+[]{.sketch-line .w100}
+[]{.sketch-line .w95}
+[]{.sketch-line .w60}
+:::
+::: {.doc-sketch}
+[News articles]{.doc-tag}
+
+[]{.sketch-line .w95}
+[]{.sketch-line .w100}
+[]{.sketch-line .w40}
+:::
+::: {.doc-sketch}
+[Survey answers]{.doc-tag}
+
+[]{.sketch-line .w100}
+[]{.sketch-line .w55}
+[]{.sketch-line .w90}
+:::
+::: {.doc-sketch}
+[Press releases]{.doc-tag}
+
+[]{.sketch-line .w90}
+[]{.sketch-line .w100}
+[]{.sketch-line .w60}
+:::
+::: {.doc-sketch}
+[Manifestos]{.doc-tag}
+
+[]{.sketch-line .w100}
+[]{.sketch-line .w95}
+[]{.sketch-line .w55}
+:::
+:::
+[Thousands to millions of documents]{.pipe-caption}
+:::
+
+::: {.pipe-arrow}
+→
+:::
+
+::: {.task-list}
+::: {.task-row}
+[Sentiment]{.task-name}
+
+[POSITIVE]{.label-chip} [NEGATIVE]{.label-chip} [NEUTRAL]{.label-chip}
+:::
+::: {.task-row}
+[Topic]{.task-name}
+
+[ECONOMY]{.label-chip} [HEALTH]{.label-chip} [IMMIGRATION]{.label-chip}
+:::
+::: {.task-row}
+[Stance]{.task-name}
+
+[SUPPORT]{.label-chip} [OPPOSE]{.label-chip} [NEUTRAL]{.label-chip}
+:::
+::: {.task-row}
+[Incivility]{.task-name}
+
+[CIVIL]{.label-chip} [UNCIVIL]{.label-chip}
+:::
+:::
+:::
+
+[A common problem in social science research: **classifying documents by their content**.]{.pipe-footer}
+
+## Lesson Overview
+
+**Lesson:** Using LLMs to label and classify text
+
+- LLMs good at "understanding" language
+- fast and (relatively) cheap
+- scales the codebook approach
+
+**Goal:** labels you can **trust** and **defend** in a paper
+
+## Components of the Lesson
+
+1. **First API call:** prompt, system prompt, model settings, structured output
+2. **Reliability:** the same label every time? ← *today*
+3. **Validity:** do the labels match ground truth 
+4. **Scaling up:** cost, caching, data privacy
+
+. . .
+
+## Learning Objectives
+
+By the end of the lesson, you will be able to:
+
+1. **label** text with an LLM through an API, choosing the prompt and settings
+2. **assess** and **improve** the **reliability** of LLM labels ← *today*
+3. **assess** the **validity** of LLM labels against ground truth 
+4. **plan** a full labeling run: cost, data privacy, provider choice 
+
+## Teaching Approach
+
+- **real** dataset and research question
+- **Exercise:** learn by **participating**
+- build up **step by step**
+- concepts introduced **when needed** 
+- code shown for **conceptual understanding**
+
+# Today's Component: How to make LLM measurement reliable
+
+## Reliability and Validity
+
+Common English words with **specific meanings** in social science research design:
+
+:::: {.columns}
+::: {.column width="40%"}
+- **Reliability:** does the measurement give the *same result* every time?
+- **Validity:** does it measure *what we want it to measure*?
+:::
+
+::: {.column width="60%"}
+```{r}
+#| label: reliability-validity
+#| fig-width: 8
+#| fig-height: 6.6
+#| fig-alt: "Four targets in a two-by-two grid. Not reliable and not valid: a wide scatter off to one side of the green bullseye. Reliable but not valid: a tight cluster away from the bullseye. Valid but not reliable: a wide scatter centered on the bullseye. Reliable and valid: a tight cluster on the bullseye."
+#| out-width: 100%
+library(ggplot2)
+
+# Target radii ------------------------------------------------------------
+r_inner  <- 1      # green bullseye
+r_middle <- 2.4
+r_outer  <- 4
+
+# Colors ------------------------------------------------------------------
+col_bullseye <- "#BFE08A"
+col_valid    <- "#7AB82E"
+col_reliable <- "#E8702A"
+col_rings    <- "grey35"
+
+# Panel centers -----------------------------------------------------------
+x_left <- 0;  x_right <- 10.6
+y_top  <- 10.4; y_bottom <- 0
+
+# Helpers -----------------------------------------------------------------
+circle <- function(r, n = 200) {
+  t <- seq(0, 2 * pi, length.out = n)
+  data.frame(x = r * cos(t), y = r * sin(t))
+}
+
+# Evenly spread but irregular points in a disk (a jittered sunflower pattern),
+# so a cloud really is centered where we say it is. Set `miss_bullseye = TRUE`
+# to replace any shots that would land on the bullseye.
+shots <- function(n, radius, center = c(0, 0), miss_bullseye = FALSE) {
+  n_try <- if (miss_bullseye) 2 * n else n
+  i <- seq_len(n_try)
+  r <- radius * sqrt((i - 0.5) / n_try) * runif(n_try, 0.95, 1.03)
+  a <- i * pi * (3 - sqrt(5)) + runif(n_try, -0.2, 0.2)
+  d <- data.frame(x = r * cos(a) + center[1], y = r * sin(a) + center[2])
+  if (miss_bullseye) {
+    d <- d[sqrt(d$x^2 + d$y^2) > r_inner + 0.12, ]
+    d <- d[sample(nrow(d), n), ]
+  }
+  d
+}
+
+place <- function(d, x0, y0) transform(d, x = x + x0, y = y + y0)
+
+# Shots -------------------------------------------------------------------
+set.seed(2026)
+n_shots <- 20
+
+# Wide scatter = about the size of the middle circle.
+# Tight cluster = about the size of the bullseye.
+points <- rbind(
+  place(shots(n_shots, r_middle, c(-1.3, 1.3), miss_bullseye = TRUE), x_left, y_top),
+  place(shots(n_shots, r_inner,  c(2.9, 0.8)),                            x_right, y_top),
+  place(shots(n_shots, r_middle),                                       x_left, y_bottom),
+  place(shots(n_shots, r_inner),                                        x_right, y_bottom)
+)
+
+# Targets -----------------------------------------------------------------
+centers <- expand.grid(x0 = c(x_left, x_right), y0 = c(y_top, y_bottom))
+
+bullseyes <- do.call(rbind, Map(function(x0, y0, id) {
+  transform(place(circle(r_inner), x0, y0), id = id)
+}, centers$x0, centers$y0, seq_len(nrow(centers))))
+
+rings <- do.call(rbind, Map(function(x0, y0, id) {
+  rbind(
+    transform(place(circle(r_inner),  x0, y0), id = paste(id, "inner")),
+    transform(place(circle(r_middle), x0, y0), id = paste(id, "middle")),
+    transform(place(circle(r_outer),  x0, y0), id = paste(id, "outer"))
+  )
+}, centers$x0, centers$y0, seq_len(nrow(centers))))
+
+# Plot --------------------------------------------------------------------
+pad <- 0.6
+
+ggplot() +
+  geom_polygon(data = bullseyes, aes(x, y, group = id), fill = col_bullseye) +
+  geom_path(data = rings, aes(x, y, group = id), color = col_rings, linewidth = 0.5) +
+  geom_point(data = points, aes(x, y), size = 1.7, color = "black") +
+  # Overlapping rectangles: right column = reliable, bottom row = valid
+  annotate("rect",
+    xmin = x_right - r_outer - pad, xmax = x_right + r_outer + pad,
+    ymin = y_bottom - r_outer - pad, ymax = y_top + r_outer + 2.4,
+    fill = NA, color = col_reliable, linewidth = 1.3) +
+  annotate("rect",
+    xmin = x_left - r_outer - 4.6, xmax = x_right + r_outer + pad + 0.3,
+    ymin = y_bottom - r_outer - pad - 0.3, ymax = y_bottom + r_outer + pad,
+    fill = NA, color = col_valid, linewidth = 1.3) +
+  # Labels
+  annotate("text", x = c(x_left, x_right), y = y_top + r_outer + 1.3,
+    label = c("Not Reliable", "Reliable"),
+    size = 7, fontface = "bold") +
+  annotate("text", x = x_left - r_outer - 0.6, y = c(y_top, y_bottom),
+    label = c("Not Valid", "Valid"),
+    size = 7, fontface = "bold", hjust = 1) +
+  coord_fixed(clip = "off") +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA)
+  )
+```
+:::
+::::
+
+## Today's Focus: Reliability
+
+Why?
+
+- reproducibility
+
+- confidence in our results
+
+- trust in science 
+
+## Introducing the Legislator Tweets Dataset
+
+```{r}
+#| label: dataset-summary
+n_tweets <- scales::comma(nrow(tweets_clean))
+n_legislators <- scales::comma(n_distinct(tweets_clean$user.id_str))
+n_states <- n_distinct(tweets_clean$legislator_state)
+date_range <- format(range(tweets_clean$created_at), "%B %Y")
+```
+
+`r n_tweets` tweets from `r n_legislators` U.S. state legislators in `r n_states` states, `r date_range[1]` to `r date_range[2]`.
+
+::: small-table
+```{r}
+#| label: dataset-table
+set.seed(2026)
+tweets_clean |>
+  slice_sample(n = 6) |>
+  transmute(
+    date = format(created_at, "%Y-%m-%d"),
+    handle = paste0("@", user.screen_name),
+    state = legislator_state,
+    text = gsub("\\s+", " ", full_text),
+    text = if_else(nchar(text) > 110, paste0(substr(text, 1, 110), "…"), text)
+  ) |>
+  knitr::kable(format = "html", escape = FALSE)
+```
+:::
+
+## Motivating Research Questions
+
+<br>
+
+**Do state legislators increasingly talk about national matters?**
+
+<br>
+
+**Do legislators from smaller states focus on national politics more?**
+
+## Defining the Task
+
+We want the LLM to classify each tweet as one of:
+
+::: {.label-task}
+::: {.tweet-sketch}
+::: {.sketch-header}
+::: {.sketch-avatar}
+:::
+::: {.sketch-names}
+[]{.sketch-line .w60 .dark}
+[]{.sketch-line .w40}
+:::
+:::
+[]{.sketch-line .w100}
+[]{.sketch-line .w90}
+[]{.sketch-line .w95}
+[]{.sketch-line .w55}
+:::
+
+::: {.label-arrow}
+?
+:::
+
+::: {.label-options}
+[NATIONAL]{.label-box}
+[STATE]{.label-box}
+[LOCAL]{.label-box}
+[NON-POLITICAL]{.label-box}
+[UNCLEAR]{.label-box}
+:::
+:::
+
+. . .
+
+We force the model to answer with exactly one of these (**structured output**).
+
+## Reliability
+
+Remember that an LLM is **probabilistic**: it picks the next "token" by sampling from a probability distribution.
+
+```{r}
+#| label: chat-simple-early
+#| ref.label: chat-simple
+#| echo: false
+```
+
+```{r}
+#| label: example-probs
+example_probs <- list(
+  "Simple prompt" = cached_probs(on_parasail(chat_simple), type, example, first_tokens)
+) |>
+  list_rbind(names_to = "prompt")
+```
+
+```{r}
+#| label: example-card
+#| output: asis
+tweet_cards(example)
+```
+
+```{r}
+#| label: token-plot
+#| fig-height: 2.6
+plot_probs(filter(example_probs, prompt == "Simple prompt"))
+```
+
+## Reliability
+
+So each time we run, **even with the same settings**, the same tweet might be classified differently.
+
+Here we'll see how we can **increase the reliability** of the labeling.
+
+. . .
+
+::: callout-box
+Reliable is not the same as **valid**. A model can give the same answer every time and still be wrong. Validity is the next component.
+:::
+
+## Step 1: Simple Prompt
+
+```{r}
+#| label: chat-simple
+#| echo: true
+#| code-line-numbers: "|1-2|4-6|8-17|9|10"
+simple_prompt <- "Classify this tweet from a U.S. state legislator as
+NATIONAL, STATE, LOCAL, NON-POLITICAL, or UNCLEAR."
+
+type <- type_object(
+  label = type_enum(c("NATIONAL", "STATE", "LOCAL", "NON-POLITICAL", "UNCLEAR"))
+)
+
+chat_simple <- chat_openrouter(
+  system_prompt = simple_prompt,
+  model = "qwen/qwen3-235b-a22b-2507",
+  params = params(temperature = 1),
+  api_args = list(provider = list(
+    order = list("DeepInfra"), allow_fallbacks = FALSE, require_parameters = TRUE
+  ))
+)
+```
+
+## Step 1: Label `r n_per_set` Tweets, 5 Times
+
+::: {.pipeline}
+::: {.pipe-col .tweet-stack}
+::: {.tweet-sketch .mini .active}
+::: {.sketch-header}
+::: {.sketch-avatar}
+:::
+::: {.sketch-names}
+[]{.sketch-line .w60 .dark}
+:::
+:::
+[]{.sketch-line .w100}
+[]{.sketch-line .w55}
+:::
+::: {.tweet-sketch .mini}
+::: {.sketch-header}
+::: {.sketch-avatar}
+:::
+::: {.sketch-names}
+[]{.sketch-line .w60 .dark}
+:::
+:::
+[]{.sketch-line .w100}
+[]{.sketch-line .w55}
+:::
+::: {.tweet-sketch .mini}
+::: {.sketch-header}
+::: {.sketch-avatar}
+:::
+::: {.sketch-names}
+[]{.sketch-line .w60 .dark}
+:::
+:::
+[]{.sketch-line .w100}
+[]{.sketch-line .w55}
+:::
+::: {.stack-dots}
+⋮
+:::
+::: {.tweet-sketch .mini}
+::: {.sketch-header}
+::: {.sketch-avatar}
+:::
+::: {.sketch-names}
+[]{.sketch-line .w60 .dark}
+:::
+:::
+[]{.sketch-line .w100}
+[]{.sketch-line .w55}
+:::
+[`r n_per_set` tweets]{.pipe-caption}
+:::
+
+::: {.pipe-arrow}
+→
+:::
+
+::: {.pipe-col .llm-box}
+[LLM]{.llm-title}
+
+::: {.prompt-box .system}
+[System prompt]{.prompt-tag}
+
+Classify this tweet from a U.S. state legislator as NATIONAL, STATE, LOCAL, NON-POLITICAL, or UNCLEAR.
+:::
+
+::: {.prompt-box .user}
+[User prompt]{.prompt-tag}
+
+::: {.tweet-sketch .mini}
+::: {.sketch-header}
+::: {.sketch-avatar}
+:::
+::: {.sketch-names}
+[]{.sketch-line .w60 .dark}
+:::
+:::
+[]{.sketch-line .w100}
+[]{.sketch-line .w55}
+:::
+:::
+
+[↻ × 5]{.repeat-badge}
+:::
+
+::: {.pipe-arrow}
+→
+:::
+
+::: {.pipe-col .label-options}
+[NATIONAL]{.label-box}
+[STATE]{.label-box .chosen}
+[LOCAL]{.label-box}
+[NON-POLITICAL]{.label-box}
+[UNCLEAR]{.label-box}
+:::
+:::
+
+[Every tweet goes through the model **5 times**: `r scales::comma(5 * n_per_set)` requests, about one cent.]{.pipe-footer}
+
+```{r}
+#| label: dev-results
+# Label each dev tweet 5 times with chat_simple; each tweet-run pair is only sent to the API once (see llm_cache.R)
+simple_dev <- cached_labels(chat_simple, type, dev)
+
+dev_results <- simple_dev |>
+  mutate(config = "1. Simple prompt", label = as.character(label))
+```
+
+```{r}
+#| label: dev-summary
+dev_tweets <- per_tweet(dev_results)
+exercise <- dev_tweets |>
+  arrange(agreement, id) |>
+  slice_head(n = 5) |>
+  left_join(select(dev, id = id_str, everything()), by = "id")
+```
+
+## Exercise: You Are the Coder
+
+Put an **X** in the one box that fits each tweet best.
+
+```{r}
+#| label: exercise-tweets
+#| output: asis
+cat(coding_grid(exercise))
+```
+
+```{r}
+#| label: handout
+# The printed handout: the same grid as the slide, as a standalone page.
+# Print it to PDF with: Chrome --headless --no-pdf-header-footer --print-to-pdf=handout.pdf handout.html
+writeLines(c(
+  '<!doctype html><html><head><meta charset="utf-8"><title>You Are the Coder</title>',
+  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;700&display=swap">',
+  "<style>", readLines("styles.css"), "</style></head><body class=\"handout\">",
+  "<h1>Exercise: You Are the Coder</h1>",
+  "<p>Put an <strong>X</strong> in the one box that fits each tweet best.</p>",
+  coding_grid(exercise),
+  "</body></html>"
+), "handout.html")
+```
+
+## Simple Prompt Results
+
+How many of the 5 runs chose each label?
+
+```{r}
+#| label: exercise-results
+#| output: asis
+exercise_counts <- dev_results |>
+  filter(id %in% exercise$id, !is.na(label)) |>
+  count(id, label)
+cat(coding_grid(exercise, exercise_counts))
+```
+
+## Simple Prompt Results: All Tweets
+
+Across all `r n_per_set` tweets:
+
+```{r}
+#| label: dev-reliability
+dev_rel <- reliability(dev_results)
+```
+
+- **`r scales::percent(dev_rel$identical)`** got the same label in all 5 runs
+- **Krippendorff's α = `r sprintf("%.2f", dev_rel$alpha)`** (agreement corrected for chance; 1 = perfect)
+
+## Step 2: Specific Prompt
+
+How do we come up with a more specific prompt?
+
+- Look at the tweets that were **labeled differently across runs**: that's where the model is uncertain
+- Encode what we learn into the prompt: **definitions** and **rules for borderline cases**
+
+. . .
+
+This is how **codebooks** are created to make inter-coder reliability high.
+
+```{r}
+#| label: themes
+flippers <- dev_tweets |>
+  filter(n_labels > 1) |>
+  left_join(select(dev, id = id_str, everything()), by = "id")
+
+# Themes identified by reading the tweets that got different labels across runs
+themes <- list(
+  district = c("1051126532532592640", "975324133864214528"),
+  levels   = c("689938129269190656", "796146585805656064"),
+  politics = c("1096137071406862336", "1091799424873971712"),
+  unclear  = c("1237381936072531968")
+)
+stopifnot(all(unlist(themes) %in% flippers$id)) # fails if the cached simple-prompt runs change
+
+theme_tweets <- function(theme) {
+  flippers |>
+    filter(id %in% themes[[theme]]) |>
+    arrange(match(id, themes[[theme]]))
+}
+
+# The model's probabilities for the theme tweets, on one call with the simple prompt
+theme_probs <- cached_probs(
+  on_parasail(chat_simple), type, filter(dev, id_str %in% unlist(themes)), first_tokens
+)
+
+theme_cards <- function(theme) {
+  theme_tweets(theme) |>
+    # Shorten a long quoted tweet so the slide fits without scrolling
+    mutate(quoted_status.full_text = if_else(
+      id == "975324133864214528",
+      sub("\\(GA House -Dist 49\\).*$", "(GA House -Dist 49) ...", quoted_status.full_text),
+      quoted_status.full_text
+    )) |>
+    rename(id_str = id) |>
+    tweet_cards(show_labels = TRUE, probs = theme_probs)
+}
+```
+
+## Where Did the Model Disagree With Itself?
+
+`r nrow(flippers)` of `r n_per_set` tweets got different labels across the 5 runs.
+
+<br>
+
+Reading them, some **themes** emerge
+
+## Theme 1: My District or My State? {.scrollable}
+
+Legislators talk about **their own district and their own seat** in the state legislature. Is that LOCAL or STATE?
+
+```{r}
+#| label: theme-district
+#| output: asis
+theme_cards("district")
+```
+
+## Theme 2: Whose Decision Is It? {.scrollable}
+
+A **place** at one level and an **actor** at another: a state agency in one district, a presidential vote in one precinct.
+
+```{r}
+#| label: theme-levels
+#| output: asis
+theme_cards("levels")
+```
+
+## Theme 3: Is This Political? {.scrollable}
+
+Holidays and scenery that **mention** something political but make **no political point**.
+
+```{r}
+#| label: theme-politics
+#| output: asis
+theme_cards("politics")
+```
+
+## Theme 4: Nothing to Go On {.scrollable}
+
+The meaning depends on **something the model can't see**: a photo, a link, an earlier tweet in a thread.
+
+```{r}
+#| label: theme-unclear
+#| output: asis
+theme_cards("unclear")
+```
+
+## Step 2: A Rule for Each Theme
+
+```{r}
+#| label: specific-prompt
+#| echo: true
+#| code-line-numbers: "|1-2|5-6|7-9|10-11|12-13"
+specific_prompt <- "Classify this tweet from a U.S. state legislator as
+NATIONAL, STATE, LOCAL, NON-POLITICAL, or UNCLEAR.
+
+Rules for borderline cases:
+1. The legislator's own district, constituents, or campaign for their seat is LOCAL,
+   even when the tweet mentions their seat in the state legislature.
+2. When a tweet mixes levels, choose the level of the main actor or decision, not
+   the place: a state agency working in one county is STATE; a presidential
+   election result in one precinct is NATIONAL.
+3. Holidays, commemorations, greetings, jokes, and scenery are NON-POLITICAL
+   unless the tweet makes a policy or political point.
+4. If the meaning depends on something you cannot see (a photo, a link, or an
+   earlier tweet in a thread), choose UNCLEAR."
+```
+
+## Step 2: Same Code, New Prompt
+
+```{r}
+#| label: chat-specific
+#| echo: true
+#| code-line-numbers: "2"
+chat_specific <- chat_openrouter(
+  system_prompt = specific_prompt,
+  model = "qwen/qwen3-235b-a22b-2507",
+  params = params(temperature = 1),
+  api_args = list(provider = list(
+    order = list("DeepInfra"), allow_fallbacks = FALSE, require_parameters = TRUE
+  ))
+)
+```
+
+```{r}
+#| label: run-test-step2
+# The test tweets, labeled 5 times with each prompt (cached, like the development tweets)
+test_results <- list(
+  "1. Simple prompt"   = cached_labels(chat_simple, type, test),
+  "2. Specific prompt" = cached_labels(chat_specific, type, test)
+) |>
+  list_rbind(names_to = "config")
+```
+
+## Step 2 Results: `r n_per_set` New Tweets
+
+Compared on **held-out tweets**, so the specific prompt wasn't written with these tweets in mind.
+
+```{r}
+#| label: results-step2
+plot_reliability(reliability(test_results), current = "2. Specific prompt")
+```
+
+## Our Example Tweet, Again
+
+```{r}
+#| label: example-probs-specific
+example_probs <- bind_rows(
+  example_probs,
+  cached_probs(on_parasail(chat_specific), type, example, first_tokens) |> mutate(prompt = "Specific prompt")
+) |>
+  mutate(prompt = factor(prompt, levels = c("Simple prompt", "Specific prompt")))
+```
+
+```{r}
+#| label: example-card-again
+#| output: asis
+tweet_cards(example)
+```
+
+```{r}
+#| label: probs-compare
+#| fig-height: 3
+plot_probs(example_probs) +
+  facet_wrap(~prompt) +
+  scale_x_continuous(labels = scales::percent, limits = c(0, 1.6), breaks = c(0, 0.5, 1))
+```
+
+## Step 3: top-k = 1
+
+With **top-k = 1**, the model can only pick the **single most likely** next token.
+
+Our example tweet with the **simple prompt**:
+
+```{r}
+#| label: topk-plot
+#| fig-height: 2.6
+simple_example <- filter(example_probs, prompt == "Simple prompt")
+plot_probs(
+  simple_example,
+  text = if_else(simple_example$p == max(simple_example$p), "always chosen", "never chosen")
+)
+```
+
+## Step 3: Same Code, One New Setting
+
+```{r}
+#| label: chat-topk
+#| echo: true
+#| code-line-numbers: "4"
+chat_topk <- chat_openrouter(
+  system_prompt = specific_prompt,
+  model = "qwen/qwen3-235b-a22b-2507",
+  params = params(temperature = 1, top_k = 1),
+  api_args = list(provider = list(
+    order = list("DeepInfra"), allow_fallbacks = FALSE, require_parameters = TRUE
+  ))
+)
+```
+
+```{r}
+#| label: run-test-step3
+test_results <- bind_rows(
+  test_results,
+  cached_labels(chat_topk, type, test) |> mutate(config = "3. + top-k = 1")
+)
+```
+
+## Step 3 Results
+
+```{r}
+#| label: results-step3
+plot_reliability(reliability(test_results), current = "3. + top-k = 1")
+```
+
+## Why Is It Still Not 100%?
+
+```{r}
+#| label: still-flipping
+still_flipping <- per_tweet(filter(test_results, config == "3. + top-k = 1")) |>
+  filter(n_labels > 1)
+```
+
+`r nrow(still_flipping)` of `r n_per_set` tweets still get different labels across runs, even though the model always picks the most likely token:
+
+- **Near-ties:** when two labels are almost equally likely, tiny numerical differences decide
+- **Hardware is not deterministic:** GPUs batch requests together, and floating-point math gives slightly different probabilities from run to run
+- **Providers change:** model versions, hardware, and quantization can change without notice
+
+## Further Steps
+
+- **continue improving prompt**
+- **few-shot prompting:** give the model labeled borderline cases
+- **majority vote:** run each tweet several times and take the most common label
+- **better model:** some LLMs are better at understanding context and following prompts
+
+## {visibility="uncounted"}
+
+```{r}
+#| label: by-state-data
+# Side analysis of the second research question; the labels come from state_national/analysis.R
+by_state_tweets <- readr::read_csv("state_national/results/labels.csv", show_col_types = FALSE) |>
+  mutate(national = as.integer(label == "NATIONAL"), log10_pop = log10(population))
+by_state <- readr::read_csv("state_national/results/by_state.csv", show_col_types = FALSE)
+
+# Linear probability models with standard errors clustered by state, since population only varies between states
+clustered <- function(model) {
+  lmtest::coeftest(model, vcov = sandwich::vcovCL(model, cluster = ~legislator_state))
+}
+state_models <- list(
+  "All tweets" = lm(national ~ log10_pop, data = by_state_tweets),
+  "Political tweets" = lm(national ~ log10_pop, data = filter(by_state_tweets, label %in% c("NATIONAL", "STATE", "LOCAL")))
+)
+slope <- clustered(state_models[["All tweets"]])["log10_pop", "Estimate"]
+fitted_range <- range(fitted(state_models[["All tweets"]]))
+```
+
+## Appendix: Do Smaller States Talk About National Matters More? {visibility="uncounted"}
+
+- **Sample:** 200 random tweets per state, `r scales::comma(nrow(by_state_tweets))` in all
+- **Labels:** our final configuration (specific prompt + top-k = 1), one run
+- **Population:** Census Bureau estimates, July 1, 2020
+- **Model:** NATIONAL or not, on log~10~ population
+
+**Result:** a state 10 times larger has **`r round(-100 * slope, 1)` points fewer** NATIONAL tweets (`r scales::percent(fitted_range[2], accuracy = 1)` in Wyoming, `r scales::percent(fitted_range[1], accuracy = 1)` in California).
+
+## Appendix: NATIONAL Tweets by State {visibility="uncounted"}
+
+```{r}
+#| label: by-state-plot
+#| fig-height: 5.5
+# Label the smallest and largest states and some of those furthest from the line
+labeled <- filter(by_state, legislator_state %in% c(
+  "Wyoming", "California", "Texas", "Maine", "New_Hampshire", "New_Mexico",
+  "Georgia", "Connecticut", "Kansas", "Rhode_Island"
+))
+ggplot(by_state, aes(population, national_share)) +
+  geom_smooth(method = "lm", formula = y ~ x, color = berkeley_blue, fill = muted) +
+  geom_text(data = labeled, aes(label = gsub("_", " ", legislator_state)), size = 5,
+            color = "#333333", vjust = -0.8) +
+  geom_point(color = berkeley_blue, size = 2.5) +
+  scale_x_log10(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0.05, 0.12))) +
+  labs(x = "State population, 2020 (log scale)", y = "Tweets labeled NATIONAL") +
+  theme(panel.grid.major.y = element_line(color = "#EEEEEE"))
+```
+
+## Appendix: Regression Results {visibility="uncounted"}
+
+Linear probability model: is the tweet labeled NATIONAL?
+
+::: {style="font-size: 0.75em"}
+```{r}
+#| label: by-state-table
+format_coef <- function(model, term) {
+  ct <- clustered(model)
+  stars <- cut(ct[term, 4], c(-Inf, 0.001, 0.01, 0.05, Inf), c("***", "**", "*", ""))
+  paste0(sprintf("%.3f", ct[term, 1]), stars, "<br>(", sprintf("%.3f", ct[term, 2]), ")")
+}
+tibble(
+  ` ` = c("log<sub>10</sub>(population)", "Intercept", "Tweets", "States"),
+  !!!map(state_models, \(m) c(
+    format_coef(m, "log10_pop"), format_coef(m, "(Intercept)"),
+    scales::comma(nobs(m)), "50"
+  ))
+) |>
+  knitr::kable(format = "html", escape = FALSE, align = c("l", "c", "c"))
+```
+
+Standard errors clustered by state in parentheses. \*p < 0.05, \*\*p < 0.01, \*\*\*p < 0.001. Political tweets: those labeled NATIONAL, STATE, or LOCAL.
+:::

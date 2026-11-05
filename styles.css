@@ -1,0 +1,581 @@
+/* Berkeley blue and California gold */
+:root {
+  --berkeley-blue: #003262;
+  --california-gold: #FDB515;
+}
+
+.reveal h1, .reveal h2 {
+  color: var(--berkeley-blue);
+}
+
+.reveal .slide-number {
+  color: var(--berkeley-blue);
+}
+
+/* Tweets rendered as cards (instead of screenshots) */
+.tweet {
+  border: 1px solid #cfd9de;
+  border-radius: 12px;
+  padding: 0.4em 0.7em;
+  margin: 0.35em 0;
+  font-size: 0.55em;
+  line-height: 1.35;
+  background: #fff;
+}
+
+.tweet .tweet-header {
+  color: #536471;
+  margin-bottom: 0.2em;
+}
+
+.tweet .tweet-header strong {
+  color: #0f1419;
+}
+
+.tweet .quoted {
+  border: 1px solid #cfd9de;
+  border-radius: 10px;
+  padding: 0.3em 0.6em;
+  margin-top: 0.3em;
+  color: #333;
+}
+
+.tweet .tweet-number {
+  float: right;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+}
+
+.small-table table {
+  font-size: 0.5em;
+}
+
+.callout-box {
+  border-left: 6px solid var(--california-gold);
+  padding: 0.3em 0.8em;
+  background: #fff8e6;
+}
+
+.reveal div.sourceCode pre code {
+  font-size: 0.85em;
+}
+
+.tweet .tweet-labels {
+  margin-top: 0.3em;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+}
+
+/* A tweet card with the model's label probabilities to its right */
+.tweet-row {
+  display: flex;
+  gap: 0.8em;
+  align-items: center;
+}
+
+.tweet-row .tweet {
+  flex: 1;
+}
+
+.probs {
+  flex: 0 0 34%;
+  font-size: 0.45em;
+  line-height: 1.2;
+}
+
+.probs .probs-title {
+  color: #536471;
+  margin-bottom: 0.3em;
+}
+
+.probs .prob-row {
+  display: grid;
+  grid-template-columns: 7.5em 1fr 2.8em;
+  align-items: center;
+  gap: 0.4em;
+  margin: 0.15em 0;
+}
+
+.probs .prob-label {
+  text-align: right;
+  color: #333;
+}
+
+.probs .prob-bar {
+  height: 0.9em;
+  background: #B8C0CC;
+}
+
+.probs .prob-row.top .prob-bar {
+  background: var(--berkeley-blue);
+}
+
+.probs .prob-row.top .prob-label,
+.probs .prob-row.top .prob-value {
+  font-weight: bold;
+}
+
+/* "Defining the Task": schematic tweet on the left, candidate labels on the right */
+.label-task {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.2em;
+  margin-top: 0.6em;
+}
+
+.tweet-sketch {
+  flex: 0 0 42%;
+  border: 2px solid #cfd9de;
+  border-radius: 16px;
+  padding: 0.7em 0.8em;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.sketch-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin-bottom: 0.6em;
+}
+
+.sketch-avatar {
+  flex: 0 0 1.6em;
+  height: 1.6em;
+  border-radius: 50%;
+  background: #B8C0CC;
+}
+
+.sketch-names {
+  flex: 1;
+}
+
+.sketch-line {
+  display: block;
+  height: 0.45em;
+  border-radius: 0.25em;
+  background: #e1e6ea;
+  margin: 0.35em 0;
+}
+
+.sketch-line.dark { background: #B8C0CC; }
+.sketch-line.w100 { width: 100%; }
+.sketch-line.w95 { width: 95%; }
+.sketch-line.w90 { width: 90%; }
+.sketch-line.w60 { width: 60%; }
+.sketch-line.w55 { width: 55%; }
+.sketch-line.w40 { width: 40%; }
+
+.label-arrow {
+  font-size: 1.6em;
+  font-weight: bold;
+  color: var(--california-gold);
+}
+
+.label-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+  flex: 0 0 30%;
+}
+
+.label-box {
+  display: block;
+  margin: 0.45em 0;
+  border: 2px solid var(--berkeley-blue);
+  border-radius: 12px;
+  padding: 0.25em 0.6em;
+  text-align: center;
+  font-size: 0.6em;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+  background: #fff;
+}
+
+/* "Step 1" pipeline: tweets -> LLM (system + user prompt) -> label */
+.pipeline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6em;
+  margin-top: 0.4em;
+}
+
+.pipe-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.tweet-stack {
+  flex: 0 0 20%;
+  gap: 0.25em;
+}
+
+.tweet-sketch.mini {
+  flex: none;
+  font-size: 0.4em;
+  padding: 0.5em 0.7em;
+  border-width: 1px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.tweet-sketch.mini .sketch-header {
+  margin-bottom: 0.3em;
+}
+
+.tweet-sketch.mini.active {
+  border: 2px solid var(--california-gold);
+}
+
+.stack-dots {
+  text-align: center;
+  font-size: 0.8em;
+  line-height: 1;
+  color: #B8C0CC;
+}
+
+.pipe-caption {
+  display: block;
+  text-align: center;
+  font-size: 0.5em;
+  font-weight: bold;
+  color: #536471;
+  margin-top: 0.2em;
+}
+
+.pipe-arrow {
+  font-size: 1.4em;
+  font-weight: bold;
+  color: var(--california-gold);
+}
+
+.llm-box {
+  position: relative;
+  flex: 0 0 38%;
+  gap: 0.4em;
+  border: 3px solid var(--berkeley-blue);
+  border-radius: 18px;
+  padding: 0.5em 0.7em 0.7em;
+  background: #f4f7fb;
+}
+
+.llm-title {
+  display: block;
+  text-align: center;
+  font-size: 0.8em;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+}
+
+.prompt-box {
+  border-radius: 10px;
+  padding: 0.3em 0.6em;
+  background: #fff;
+  font-size: 0.45em;
+  line-height: 1.3;
+}
+
+.prompt-box p {
+  margin: 0.2em 0;
+}
+
+.prompt-box.system {
+  border: 1px solid #B8C0CC;
+}
+
+.prompt-box.user {
+  border: 2px solid var(--california-gold);
+}
+
+.prompt-box .tweet-sketch.mini {
+  font-size: 0.85em;
+  margin: 0.2em 0;
+}
+
+.prompt-tag {
+  display: block;
+  font-weight: bold;
+  color: #536471;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.85em;
+}
+
+.repeat-badge {
+  position: absolute;
+  top: -0.7em;
+  right: -0.7em;
+  background: var(--california-gold);
+  color: var(--berkeley-blue);
+  font-weight: bold;
+  font-size: 0.6em;
+  border-radius: 999px;
+  padding: 0.25em 0.6em;
+}
+
+.pipeline .label-options {
+  flex: 0 0 22%;
+  gap: 0;
+}
+
+.label-box.chosen {
+  background: var(--berkeley-blue);
+  color: #fff;
+}
+
+.pipe-footer {
+  display: block;
+  text-align: center;
+  font-size: 0.6em;
+  color: #536471;
+  margin-top: 0.8em;
+}
+
+.tweet-stack p,
+.llm-box > p {
+  margin: 0;
+}
+
+/* Coding grid: tweets as rows, labels as slanted columns, a box per cell.
+   Used on the exercise slide, the results slide, and the printed handout. */
+/* Room on the right for the slanted labels, which stick out past the last column */
+.coding-grid-wrap {
+  display: flex;
+  justify-content: center;
+  padding-right: 5em;
+}
+
+.coding-grid {
+  border-collapse: collapse;
+}
+
+.reveal .coding-grid {
+  font-size: 0.34em;
+}
+
+.reveal .coding-grid td.grid-tweet {
+  width: 44em;
+}
+
+.reveal .coding-grid th.grid-label {
+  height: 6em;
+}
+
+.reveal .coding-grid th.grid-label span {
+  font-size: 1.2em;
+}
+
+.coding-grid th,
+.coding-grid td {
+  border: none;
+  padding: 0;
+}
+
+.coding-grid th.grid-label {
+  height: 7.5em;
+  width: 3.6em;
+  min-width: 3.6em;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+/* Rotate the label so it starts at the middle of its column and slants up and right */
+.coding-grid th.grid-label > div {
+  width: 3.6em;
+  transform: translate(1.8em, -0.4em) rotate(-45deg);
+  transform-origin: bottom left;
+}
+
+.coding-grid th.grid-label span {
+  display: inline-block;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+  border-bottom: 1px solid #cfd9de;
+  padding: 0 0.3em 0.1em;
+}
+
+.coding-grid td.grid-tweet {
+  width: 30em;
+  padding: 0.25em 0.6em 0.25em 0;
+}
+
+.coding-grid td.grid-tweet .tweet {
+  font-size: 1em;
+  margin: 0;
+}
+
+.coding-grid td.grid-cell {
+  text-align: center;
+  vertical-align: middle;
+  border-left: 1px solid #e1e6ea;
+}
+
+.coding-grid td.grid-cell:last-child {
+  border-right: 1px solid #e1e6ea;
+}
+
+.coding-grid tbody tr + tr td {
+  border-top: 1px solid #e1e6ea;
+}
+
+.coding-grid .grid-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2em;
+  height: 2.2em;
+  border: 2px solid var(--berkeley-blue);
+  border-radius: 4px;
+  background: #fff;
+  font-size: 1.1em;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+}
+
+/* Filled-in counts: shade each box by how many of the 5 runs chose it */
+.coding-grid .grid-box[style] {
+  background: color-mix(in srgb, var(--berkeley-blue) calc(var(--share) * 100%), #fff);
+}
+
+.coding-grid .grid-box.dark {
+  color: #fff;
+}
+
+.coding-grid .grid-box.zero {
+  border-color: #cfd9de;
+  color: #B8C0CC;
+}
+
+/* The printed handout (handout.html -> handout.pdf) */
+@page {
+  size: letter;
+  margin: 0.6in;
+}
+
+body.handout {
+  font-family: "Source Sans Pro", "Source Sans 3", Helvetica, Arial, sans-serif;
+  font-size: 11pt;
+  color: #222;
+  background: #fff;
+}
+
+body.handout h1 {
+  color: var(--berkeley-blue);
+  font-size: 20pt;
+  margin: 0 0 0.2em;
+}
+
+body.handout .coding-grid-wrap {
+  justify-content: flex-start;
+  margin-top: 0.5em;
+}
+
+body.handout .coding-grid td.grid-tweet {
+  width: 26em;
+}
+
+body.handout .coding-grid tr {
+  break-inside: avoid;
+}
+
+/* First "Lesson Overview": a large corpus of documents -> classification tasks */
+.corpus-task {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8em;
+  margin-top: 0.6em;
+}
+
+.corpus {
+  flex: 0 0 38%;
+}
+
+.corpus-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9em 1.1em;
+  padding: 0 0.5em 0.5em 0;
+}
+
+/* Offset outlines behind each card suggest a stack of documents */
+.doc-sketch {
+  border: 1px solid #cfd9de;
+  border-radius: 8px;
+  padding: 0.4em 0.6em 0.5em;
+  background: #fff;
+  font-size: 0.4em;
+  box-shadow:
+    5px 5px 0 -1px #fff, 5px 5px 0 0 #cfd9de,
+    10px 10px 0 -1px #fff, 10px 10px 0 0 #cfd9de;
+}
+
+.doc-sketch p {
+  margin: 0;
+}
+
+.doc-tag {
+  display: block;
+  font-weight: bold;
+  color: #536471;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.3em;
+}
+
+.corpus .pipe-caption {
+  margin-top: 0.6em;
+}
+
+.task-list {
+  flex: 0 0 52%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  border: 1px solid #e1e6ea;
+  border-radius: 12px;
+  padding: 0.3em 0.6em;
+  background: #fff;
+}
+
+.task-row p {
+  margin: 0;
+}
+
+/* Task name, then its labels on one line */
+.task-row > p:first-child {
+  flex: none;
+}
+
+.task-row > p:nth-child(2) {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.task-name {
+  display: inline-block;
+  width: 8.2em;
+  font-size: 0.55em;
+  font-weight: bold;
+  color: #333;
+}
+
+.label-chip {
+  display: inline-block;
+  margin: 0.1em 0.15em;
+  border: 2px solid var(--berkeley-blue);
+  border-radius: 8px;
+  padding: 0.1em 0.45em;
+  font-size: 0.42em;
+  font-weight: bold;
+  color: var(--berkeley-blue);
+  background: #fff;
+}
